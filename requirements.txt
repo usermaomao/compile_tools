@@ -1,0 +1,17 @@
+# Compile Tools - Python Dependencies
+# ====================================
+
+# GUI Framework
+PySide6>=6.5.0
+
+# SSH Client Library
+paramiko>=3.0.0
+
+# Additional dependencies that might be needed
+# (These are typically included with Python standard library)
+# sqlite3 - included with Python
+# os - included with Python
+# sys - included with Python
+# pathlib - included with Python
+# select - included with Python
+# stat - included with Python

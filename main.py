@@ -14,14 +14,17 @@ Classes:
     MainWindow: The main application window orchestrating all UI and functionality.
 """
 import sys
+import logging
+from typing import Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QStackedWidget, QLabel, QListWidgetItem, QPushButton,
     QDialog, QFormLayout, QLineEdit, QComboBox, QSpinBox, QFileDialog,
-    QMessageBox, QCheckBox, QTextEdit
+    QMessageBox, QCheckBox, QTextEdit, QGridLayout, QProgressDialog
 )
-from PySide6.QtCore import Qt, QSize, QThread, Signal
-from PySide6.QtWidgets import QGroupBox, QAbstractItemView # Added for artifact area
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
+from PySide6.QtWidgets import QGroupBox, QAbstractItemView, QStyle
+from PySide6.QtGui import QTextCursor
 import database # Import database module
 import paramiko # For SSH connection testing
 import select # For non-blocking read from SSH channel
@@ -505,6 +508,9 @@ class MainWindow(QMainWindow):
         # Populate Navigation and Content
         self.setup_navigation()
 
+        # Setup status monitoring
+        self.setup_status_timer()
+
     def setup_navigation(self):
         # Host Management
         nav_hosts_item = QListWidgetItem("Host Management")
@@ -630,8 +636,14 @@ class MainWindow(QMainWindow):
                 self.host_list_widget.addItem(no_hosts_item)
             else:
                 for host in hosts:
-                    # Customize item display later to include more info and status indicator
-                    item_text = f"{host['name']} ({host['username']}@{host['hostname']}:{host['port']})"
+                    # Add connection status indicator
+                    status_indicator = "🔴"  # Default to disconnected
+                    if host['id'] in self._ssh_clients:
+                        client = self._ssh_clients[host['id']]
+                        if client.get_transport() and client.get_transport().is_active():
+                            status_indicator = "🟢"  # Connected
+
+                    item_text = f"{status_indicator} {host['name']} ({host['username']}@{host['hostname']}:{host['port']})"
                     list_item = QListWidgetItem(item_text)
                     list_item.setData(Qt.UserRole, host['id']) # Store host ID in the item
                     self.host_list_widget.addItem(list_item)
@@ -809,23 +821,6 @@ class MainWindow(QMainWindow):
 
         action_buttons_layout = QHBoxLayout()
         self.add_project_button = QPushButton("Add New Project")
-        # self.add_project_button.clicked.connect(self.open_add_project_dialog) # Connect later
-        action_buttons_layout.addWidget(self.add_project_button)
-
-        self.edit_project_button = QPushButton("Edit Selected Project")
-        self.edit_project_button.setEnabled(False)
-        # self.edit_project_button.clicked.connect(self.open_edit_project_dialog) # Connect later
-        action_buttons_layout.addWidget(self.edit_project_button)
-
-        self.delete_project_button = QPushButton("Delete Selected Project")
-        self.delete_project_button.setStyleSheet("background-color: #ffdddd; color: #D8000C;")
-        self.delete_project_button.setEnabled(False)
-        # self.delete_project_button.clicked.connect(self.delete_selected_project) # Connect later
-        action_buttons_layout.addWidget(self.delete_project_button)
-
-        action_buttons_layout.addStretch()
-        layout.addLayout(action_buttons_layout)
-
         self.add_project_button.clicked.connect(self.open_add_project_dialog)
         action_buttons_layout.addWidget(self.add_project_button)
 
@@ -1047,19 +1042,23 @@ class MainWindow(QMainWindow):
 
         self.start_compile_button = QPushButton("Start Compilation")
         self.start_compile_button.clicked.connect(self.start_compilation_process)
-        self.start_compile_button.setIcon(self.style().standardIcon(getattr(QStyle, "SP_MediaPlay", QStyle.StandardPixmap.SP_MediaPlay))) # Example Icon
+        self.start_compile_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         control_layout.addWidget(self.start_compile_button)
 
         self.interrupt_compile_button = QPushButton("Interrupt")
         self.interrupt_compile_button.clicked.connect(self.interrupt_compilation_process)
         self.interrupt_compile_button.setEnabled(False) # Enabled only during compilation
-        self.interrupt_compile_button.setIcon(self.style().standardIcon(getattr(QStyle, "SP_MediaStop", QStyle.StandardPixmap.SP_MediaStop))) # Example Icon
+        self.interrupt_compile_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
         self.interrupt_compile_button.setStyleSheet("background-color: #e74c3c;") # Reddish color
         control_layout.addWidget(self.interrupt_compile_button)
 
         self.clear_log_button = QPushButton("Clear Log")
         self.clear_log_button.clicked.connect(self.compile_log_display.clear)
         control_layout.addWidget(self.clear_log_button)
+
+        self.test_connection_button = QPushButton("Test Connection")
+        self.test_connection_button.clicked.connect(self.test_selected_connection)
+        control_layout.addWidget(self.test_connection_button)
 
 
         main_layout.addLayout(control_layout)
@@ -1159,9 +1158,60 @@ class MainWindow(QMainWindow):
             print(f"Error loading hosts into combobox: {e}")
             self.compile_host_combo.addItem(f"Error: {e}", None)
 
-    # Placeholder for actual SSH connection management
-    # This will be expanded significantly
+    # SSH connection management
     _ssh_clients = {} # host_id: paramiko.SSHClient()
+
+    def setup_status_timer(self):
+        """Setup timer for connection status updates"""
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_connection_status)
+        self.status_timer.start(5000)  # Update every 5 seconds
+
+    def update_connection_status(self):
+        """Update connection status indicators in the host list"""
+        if hasattr(self, 'host_list_widget'):
+            self.load_host_list()  # Refresh the host list with updated status
+
+    def test_selected_connection(self):
+        """Test connection to the currently selected host"""
+        host_id = self.compile_host_combo.currentData()
+        if not host_id:
+            QMessageBox.warning(self, "Selection Error", "Please select a host first.")
+            return
+
+        host_config = database.get_ssh_host_by_id(host_id)
+        if not host_config:
+            QMessageBox.critical(self, "Error", f"Host configuration for ID {host_id} not found.")
+            return
+
+        self.test_connection_button.setEnabled(False)
+        self.test_connection_button.setText("Testing...")
+        self.compile_status_label.setText(f"Status: Testing connection to {host_config['name']}...")
+        QApplication.processEvents()
+
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            if host_config["auth_method"] == "password":
+                ssh.connect(host_config["hostname"], port=host_config["port"],
+                           username=host_config["username"], password=host_config["password"],
+                           timeout=10, allow_agent=False, look_for_keys=False)
+            else:  # key authentication
+                ssh.connect(host_config["hostname"], port=host_config["port"],
+                           username=host_config["username"], key_filename=host_config["key_path"],
+                           timeout=10)
+
+            ssh.close()
+            QMessageBox.information(self, "Connection Test", f"Successfully connected to {host_config['name']}!")
+            self.compile_status_label.setText(f"Status: Connection test successful")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Connection Test Failed", f"Failed to connect to {host_config['name']}: {str(e)}")
+            self.compile_status_label.setText(f"Status: Connection test failed")
+        finally:
+            self.test_connection_button.setEnabled(True)
+            self.test_connection_button.setText("Test Connection")
 
     def get_ssh_client(self, host_id: int) -> Optional[paramiko.SSHClient]:
         """
@@ -1195,9 +1245,11 @@ class MainWindow(QMainWindow):
 
             self._ssh_clients[host_id] = client
             self.compile_status_label.setText(f"Status: Connected to {host_config['name']}")
+            logging.info(f"Successfully connected to {host_config['name']} ({host_config['hostname']})")
             return client
         except Exception as e:
             self._ssh_clients.pop(host_id, None) # Remove if connection failed
+            logging.error(f"SSH connection failed to {host_config['name']}: {e}")
             QMessageBox.critical(self, "SSH Connection Error", f"Failed to connect to {host_config['name']}: {e}")
             self.compile_status_label.setText(f"Status: Connection failed to {host_config['name']}")
             return None
@@ -1311,6 +1363,7 @@ class MainWindow(QMainWindow):
             del self.compilation_thread
 
         if success: # If compilation was successful, try to refresh artifacts
+            self.refresh_artifacts_button.setEnabled(True)
             self.refresh_remote_artifacts()
 
 
@@ -1421,44 +1474,51 @@ class MainWindow(QMainWindow):
         sftp = None
         try:
             sftp = ssh_client.open_sftp()
-            # Basic progress tracking
-            # TODO: Implement QProgressDialog for better UX
             total_files = len(selected_items)
             downloaded_count = 0
+
+            # Create progress dialog
+            progress = QProgressDialog("Downloading artifacts...", "Cancel", 0, total_files, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            progress.show()
 
             self.compile_status_label.setText(f"Status: Downloading 0/{total_files} artifacts...")
             QApplication.processEvents()
 
 
-            for item in selected_items:
+            for i, item in enumerate(selected_items):
+                if progress.wasCanceled():
+                    break
+
                 filename = item.data(Qt.UserRole)
                 file_type = item.data(Qt.UserRole + 1)
 
                 if file_type == "DIR":
                     self.append_log_message(f"Skipping directory download: {filename} (not yet implemented).\n")
                     total_files -=1 # Adjust total for skipped dirs
-                    if total_files == 0 and downloaded_count == 0 : # if only dirs were selected
-                         self.compile_status_label.setText("Status: No files selected for download.")
-                    elif downloaded_count == total_files: # if all actual files are downloaded
-                         self.compile_status_label.setText(f"Status: Download complete ({downloaded_count}/{total_files}).")
-                    else: # update progress
-                        self.compile_status_label.setText(f"Status: Downloading {downloaded_count}/{total_files} artifacts...")
-                    QApplication.processEvents()
+                    progress.setMaximum(total_files)
                     continue
 
                 remote_full_path = f"{remote_artifact_base_path.rstrip('/')}/{filename}"
                 local_full_path = os.path.join(local_save_dir, filename)
 
                 try:
-                    self.append_log_message(f"Downloading {filename} to {local_full_path}...\n")
+                    progress.setLabelText(f"Downloading {filename}...")
+                    progress.setValue(downloaded_count)
                     QApplication.processEvents()
 
-                    # Simple SFTP get with callback for progress (very basic)
-                    # For a real progress bar, a separate thread for download and more complex callback is needed.
-                    # This is a blocking download per file.
+                    if progress.wasCanceled():
+                        break
+
+                    self.append_log_message(f"Downloading {filename} to {local_full_path}...\n")
+
+                    # Simple SFTP get - for better progress, would need custom callback
                     sftp.get(remote_full_path, local_full_path)
                     self.append_log_message(f"Successfully downloaded {filename}.\n")
                     downloaded_count += 1
+                    progress.setValue(downloaded_count)
                     self.compile_status_label.setText(f"Status: Downloading {downloaded_count}/{total_files} artifacts...")
                     QApplication.processEvents()
 
@@ -1466,15 +1526,21 @@ class MainWindow(QMainWindow):
                     self.append_log_message(f"Failed to download {filename}: {e}\n")
                     QMessageBox.warning(self, "Download Error", f"Failed to download {filename}: {e}")
 
-            if downloaded_count > 0:
+            progress.setValue(total_files)  # Complete the progress bar
+
+            if progress.wasCanceled():
+                self.compile_status_label.setText("Status: Download cancelled.")
+                QMessageBox.information(self, "Download Cancelled", f"Download was cancelled. {downloaded_count} files were downloaded.")
+            elif downloaded_count > 0:
                 QMessageBox.information(self, "Download Complete",
                                         f"{downloaded_count} artifact(s) downloaded to {local_save_dir}.")
+                self.compile_status_label.setText(f"Status: Download complete ({downloaded_count}/{total_files}).")
             elif total_files == 0 : # Only directories were selected initially
                  QMessageBox.information(self, "Download Info", "No files were selected for download (directories are skipped).")
+                 self.compile_status_label.setText("Status: No files to download.")
             else: # No files downloaded, but some were attempted
                  QMessageBox.warning(self, "Download Failed", "No artifacts were successfully downloaded.")
-
-            self.compile_status_label.setText(f"Status: Download finished ({downloaded_count}/{total_files}).")
+                 self.compile_status_label.setText("Status: Download failed.")
 
         except Exception as e:
             QMessageBox.critical(self, "SFTP Error", f"An error occurred during SFTP operation: {e}")
@@ -1513,13 +1579,34 @@ class MainWindow(QMainWindow):
             }
         """)
 
+def setup_logging():
+    """Setup logging configuration"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('compile_tools.log'),
+            logging.StreamHandler()
+        ]
+    )
+
 if __name__ == "__main__":
+    # Setup logging
+    setup_logging()
+    logging.info("Starting Compile Tools application")
+
     # Ensure database is initialized before starting the app
     import database # Import here to use its functions
-    database.create_tables() # Create tables if they don't exist
+    try:
+        database.create_tables() # Create tables if they don't exist
+        logging.info("Database initialized successfully")
+    except Exception as e:
+        logging.error(f"Database initialization failed: {e}")
+        sys.exit(1)
 
     app = QApplication(sys.argv)
     window = MainWindow()
     window.load_styles() # Apply global styles
     window.show()
+    logging.info("Application window shown")
     sys.exit(app.exec())

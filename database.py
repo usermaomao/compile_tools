@@ -21,18 +21,22 @@ import os
 import sys # Needed for sys.platform
 from pathlib import Path
 
-# Determine OS-specific path for the database
-APP_NAME = "CompileTools"
-if os.name == 'nt':  # Windows
-    DB_DIR = Path(os.getenv('APPDATA', Path.home() / "AppData" / "Roaming")) / APP_NAME
-elif sys.platform == "darwin":  # macOS
-    DB_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
-else:  # Linux and other POSIX
-    DB_DIR = Path(os.getenv('XDG_DATA_HOME', Path.home() / ".local" / "share")) / APP_NAME
+# Import configuration
+try:
+    from config import get_database_path
+    DB_NAME = get_database_path()
+except ImportError:
+    # Fallback to original logic if config.py is not available
+    APP_NAME = "CompileTools"
+    if os.name == 'nt':  # Windows
+        DB_DIR = Path(os.getenv('APPDATA', Path.home() / "AppData" / "Roaming")) / APP_NAME
+    elif sys.platform == "darwin":  # macOS
+        DB_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
+    else:  # Linux and other POSIX
+        DB_DIR = Path(os.getenv('XDG_DATA_HOME', Path.home() / ".local" / "share")) / APP_NAME
 
-DB_DIR.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
-DB_NAME = DB_DIR / "compile_tools.db"
-# print(f"Database will be stored at: {DB_NAME}") # For debugging path
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    DB_NAME = DB_DIR / "compile_tools.db"
 
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
@@ -63,20 +67,47 @@ def create_tables():
     # For a real application, consider using system keychain services or encryption.
     # For this project, we'll store it directly as per typical simplified tool requirements.
 
-    # Compile Projects Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS compile_projects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,       -- User-defined unique name for the project
-            remote_base_path TEXT NOT NULL,  -- Base path of the project on the remote server
-            compile_commands TEXT NOT NULL,  -- Multi-line commands to run for compilation
-            artifact_path TEXT NOT NULL,     -- Path to the directory where artifacts are stored after compilation
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Renamed remote_path to remote_base_path for clarity
-    # Renamed commands to compile_commands for clarity
-    # Renamed artifact_dir to artifact_path for clarity
+    # Check if compile_projects table exists with old schema and migrate if needed
+    cursor.execute("PRAGMA table_info(compile_projects)")
+    columns = [column[1] for column in cursor.fetchall()]
+
+    if 'remote_path' in columns:
+        # Old schema exists, need to migrate
+        print("Migrating compile_projects table to new schema...")
+        cursor.execute("""
+            CREATE TABLE compile_projects_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                remote_base_path TEXT NOT NULL,
+                compile_commands TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Copy data from old table to new table
+        cursor.execute("""
+            INSERT INTO compile_projects_new (id, name, remote_base_path, compile_commands, artifact_path, created_at)
+            SELECT id, name, remote_path, commands, artifact_dir, created_at
+            FROM compile_projects
+        """)
+
+        # Drop old table and rename new table
+        cursor.execute("DROP TABLE compile_projects")
+        cursor.execute("ALTER TABLE compile_projects_new RENAME TO compile_projects")
+        print("Migration completed.")
+    else:
+        # Create new table with correct schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS compile_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,       -- User-defined unique name for the project
+                remote_base_path TEXT NOT NULL,  -- Base path of the project on the remote server
+                compile_commands TEXT NOT NULL,  -- Multi-line commands to run for compilation
+                artifact_path TEXT NOT NULL,     -- Path to the directory where artifacts are stored after compilation
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     conn.commit()
     conn.close()
