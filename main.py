@@ -26,6 +26,7 @@ from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
 from PySide6.QtWidgets import QGroupBox, QAbstractItemView, QStyle
 from PySide6.QtGui import QTextCursor
 import database # Import database module
+import config # Import configuration module
 import paramiko # For SSH connection testing
 import select # For non-blocking read from SSH channel
 import os # For path joining in download
@@ -680,6 +681,7 @@ class MainWindow(QMainWindow):
                 )
                 if host_id:
                     self.load_host_list()
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Host '{data['name']}' added successfully.")
                     # Try to select the newly added host
                     for i in range(self.host_list_widget.count()):
@@ -740,6 +742,7 @@ class MainWindow(QMainWindow):
                 )
                 if success:
                     self.load_host_list() # Reload to reflect changes
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Host '{data['name']}' updated successfully.")
                 else:
                     QMessageBox.warning(self, "Database Error", f"Failed to update host '{data['name']}'. The name might already conflict or there was a database issue.")
@@ -776,6 +779,7 @@ class MainWindow(QMainWindow):
             try:
                 if database.delete_ssh_host(host_id):
                     self.load_host_list()
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Host '{host_name_for_dialog}' deleted successfully.")
                 else:
                     # This case might occur if the host was already deleted by another process
@@ -905,6 +909,7 @@ class MainWindow(QMainWindow):
                 )
                 if project_id:
                     self.load_project_list()
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Project '{data['name']}' added successfully.")
                     for i in range(self.project_list_widget.count()): # Try to select new item
                         item = self.project_list_widget.item(i)
@@ -947,6 +952,7 @@ class MainWindow(QMainWindow):
                 )
                 if success:
                     self.load_project_list()
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Project '{data['name']}' updated successfully.")
                 else:
                     QMessageBox.warning(self, "Database Error", f"Failed to update project '{data['name']}'. Name might conflict.")
@@ -973,6 +979,7 @@ class MainWindow(QMainWindow):
             try:
                 if database.delete_compile_project(project_id):
                     self.load_project_list()
+                    self.refresh_compile_selections()  # 刷新编译页面的选择列表
                     QMessageBox.information(self, "Success", f"Project '{project_name}' deleted successfully.")
                 else:
                     QMessageBox.warning(self, "Database Error", f"Failed to delete project '{project_name}'.")
@@ -1136,17 +1143,34 @@ class MainWindow(QMainWindow):
 
 
     def load_projects_into_combobox(self):
+        # 保存当前选择
+        current_selection = self.compile_project_combo.currentData()
+
         self.compile_project_combo.clear()
         self.compile_project_combo.addItem("Choose a project...", None) # Placeholder
         try:
             projects = database.get_all_compile_projects()
             for project in projects:
                 self.compile_project_combo.addItem(f"{project['name']}", project['id'])
+
+            # 自动选择逻辑：如果只有一个项目且启用了自动选择
+            if len(projects) == 1 and config.DEFAULTS.get("auto_select_single_option", True):
+                self.compile_project_combo.setCurrentIndex(1)  # 选择第一个项目（跳过占位符）
+            elif current_selection:
+                # 尝试恢复之前的选择
+                for i in range(self.compile_project_combo.count()):
+                    if self.compile_project_combo.itemData(i) == current_selection:
+                        self.compile_project_combo.setCurrentIndex(i)
+                        break
+
         except Exception as e:
             print(f"Error loading projects into combobox: {e}")
             self.compile_project_combo.addItem(f"Error: {e}", None)
 
     def load_hosts_into_combobox(self):
+        # 保存当前选择
+        current_selection = self.compile_host_combo.currentData()
+
         self.compile_host_combo.clear()
         self.compile_host_combo.addItem("Choose a host...", None) # Placeholder
         try:
@@ -1154,9 +1178,26 @@ class MainWindow(QMainWindow):
             for host in hosts:
                 # We might want to store more than just ID, e.g., hostname for direct use
                 self.compile_host_combo.addItem(f"{host['name']} ({host['username']}@{host['hostname']})", host['id'])
+
+            # 自动选择逻辑：如果只有一个主机且启用了自动选择
+            if len(hosts) == 1 and config.DEFAULTS.get("auto_select_single_option", True):
+                self.compile_host_combo.setCurrentIndex(1)  # 选择第一个主机（跳过占位符）
+            elif current_selection:
+                # 尝试恢复之前的选择
+                for i in range(self.compile_host_combo.count()):
+                    if self.compile_host_combo.itemData(i) == current_selection:
+                        self.compile_host_combo.setCurrentIndex(i)
+                        break
+
         except Exception as e:
             print(f"Error loading hosts into combobox: {e}")
             self.compile_host_combo.addItem(f"Error: {e}", None)
+
+    def refresh_compile_selections(self):
+        """刷新编译页面的项目和主机选择列表"""
+        self.load_projects_into_combobox()
+        self.load_hosts_into_combobox()
+        self._update_selected_info_text()
 
     # SSH connection management
     _ssh_clients = {} # host_id: paramiko.SSHClient()
@@ -1462,9 +1503,25 @@ class MainWindow(QMainWindow):
 
         remote_artifact_base_path = project_details['artifact_path']
 
-        local_save_dir = QFileDialog.getExistingDirectory(self, "Select Directory to Save Artifacts")
-        if not local_save_dir:
-            return # User cancelled
+        # 使用相对路径下载
+        if config.DEFAULTS.get("use_relative_download_path", True):
+            # 基于项目名称创建下载目录
+            project_name = project_details['name']
+            # 清理项目名称，移除不安全的字符
+            safe_project_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_project_name = safe_project_name.replace(' ', '_')
+
+            local_save_dir = config.get_download_root_path() / safe_project_name
+            local_save_dir.mkdir(parents=True, exist_ok=True)
+            local_save_dir = str(local_save_dir)
+
+            # 显示下载路径信息
+            QMessageBox.information(self, "下载路径", f"文件将下载到: {local_save_dir}")
+        else:
+            # 使用传统的文件夹选择对话框
+            local_save_dir = QFileDialog.getExistingDirectory(self, "Select Directory to Save Artifacts")
+            if not local_save_dir:
+                return # User cancelled
 
         ssh_client = self.get_ssh_client(host_id)
         if not ssh_client:
@@ -1488,7 +1545,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
 
-            for i, item in enumerate(selected_items):
+            for item in selected_items:
                 if progress.wasCanceled():
                     break
 

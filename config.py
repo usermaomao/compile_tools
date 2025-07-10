@@ -65,7 +65,10 @@ DEFAULTS = {
     "ssh_port": 22,
     "auth_method": "password",
     "compile_timeout": 300,  # 5 minutes
-    "artifact_refresh_after_compile": True
+    "artifact_refresh_after_compile": True,
+    "auto_select_single_option": True,  # 当只有一个选项时自动选择
+    "use_relative_download_path": True,  # 使用相对下载路径
+    "download_root_dir": "downloads"  # 下载根目录
 }
 
 def get_app_data_dir():
@@ -85,6 +88,17 @@ def get_log_file_path():
     """Get the full path to the log file"""
     return get_app_data_dir() / LOG_FILE
 
+def get_download_root_path():
+    """Get the download root directory path"""
+    from pathlib import Path
+    import os
+    # 使用当前工作目录下的downloads文件夹
+    return Path(os.getcwd()) / DEFAULTS["download_root_dir"]
+
 # Ensure app data directory exists
 APP_DATA_DIR = get_app_data_dir()
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ensure download directory exists
+DOWNLOAD_ROOT_DIR = get_download_root_path()
+DOWNLOAD_ROOT_DIR.mkdir(parents=True, exist_ok=True)
